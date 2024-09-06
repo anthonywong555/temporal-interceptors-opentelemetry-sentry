@@ -1,20 +1,13 @@
-import { DefaultLogger, Worker, Runtime } from '@temporalio/worker';
-import { Resource } from '@opentelemetry/resources';
-import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
-import { ConsoleSpanExporter } from '@opentelemetry/sdk-trace-base';
+import { setupSentry, resource, exporter } from './instrumentation';
+import { DefaultLogger, Worker, Runtime, NativeConnection } from '@temporalio/worker';
 import { NodeSDK } from '@opentelemetry/sdk-node';
-import {
-  OpenTelemetryActivityInboundInterceptor,
-  makeWorkflowExporter,
-} from '@temporalio/interceptors-opentelemetry/lib/worker';
+import { OpenTelemetryActivityInboundInterceptor, makeWorkflowExporter } from '@temporalio/interceptors-opentelemetry/lib/worker';
 import * as activities from './activities';
+import { namespace, taskQueue, getConnectionOptions, getWorkflowOptions, env } from './env';
 
 async function main() {
-  const resource = new Resource({
-    [SemanticResourceAttributes.SERVICE_NAME]: 'interceptors-sample-worker',
-  });
-  // Export spans to console for simplicity
-  const exporter = new ConsoleSpanExporter();
+  // Setup Sentry
+  await setupSentry();
 
   const otel = new NodeSDK({ traceExporter: exporter, resource });
   await otel.start();
@@ -22,21 +15,29 @@ async function main() {
   // Silence the Worker logs to better see the span output in this sample
   Runtime.install({ logger: new DefaultLogger('WARN') });
 
+  const connectionOptions = await getConnectionOptions();
+  const connection = await NativeConnection.connect(connectionOptions);
+
   const worker = await Worker.create({
-    workflowsPath: require.resolve('./workflows'),
+    connection,
+    namespace,
+    taskQueue,
     activities,
-    taskQueue: 'interceptors-opentelemetry-example',
+    ...getWorkflowOptions(),
     sinks: {
       exporter: makeWorkflowExporter(exporter, resource),
     },
     // Registers opentelemetry interceptors for Workflow and Activity calls
     interceptors: {
-      // example contains both workflow and interceptors
-      workflowModules: [require.resolve('./workflows')],
       activity: [(ctx) => ({ inbound: new OpenTelemetryActivityInboundInterceptor(ctx) })],
+      ...(env != 'production' && {
+        workflowModules: [require.resolve('./workflows')],
+      })
     },
   });
   try {
+    console.info('🤖: Temporal Worker Online! Beep Boop Beep!');
+    console.info(`🤖: Node Env ${env}`);
     await worker.run();
   } finally {
     await otel.shutdown();
